@@ -1,0 +1,361 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>数独完成器</title>
+<style>
+  body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; padding: 20px; background: #f7f7f7; }
+  h1 { margin: 0 0 12px; font-size: 20px; }
+  #board { display: grid; grid-template-columns: repeat(9,44px); gap: 4px; margin-bottom: 12px; }
+  .cell { width: 44px; height: 44px; box-sizing: border-box; display:flex; align-items:center; justify-content:center; background:white; border:1px solid #bbb; font-size:20px; }
+  .cell input { width:100%; height:100%; text-align:center; font-size:20px; border: none; outline: none; background: transparent; }
+  /* Thicker borders for 3x3 blocks */
+  .cell.box-right { border-right: 2px solid #444; }
+  .cell.box-bottom { border-bottom: 2px solid #444; }
+  .cell.box-left { border-left: 2px solid #444; }
+  .cell.box-top { border-top: 2px solid #444; }
+
+  .invalid { background: #ffe6e6; }
+  #controls { margin-bottom: 8px; }
+  button { padding: 6px 12px; margin-right:8px; font-size:14px; }
+  #msg { color:#b00; margin-top:8px; min-height:18px; }
+  small { color:#555; display:block; margin-top:8px; }
+</style>
+</head>
+<body>
+  <h1>数独完成器</h1>
+  <div id="board"></div>
+  <div id="controls">
+    <button id="startBtn">开始</button>
+    <button id="clearBtn">清空</button>
+    <button id="randomBtn">生成完整随机解（可选）</button>
+  </div>
+  <div id="msg"></div>
+  <small>输入数字 1-9，非法（与同行/列/宫冲突）会标红。点击“开始”将尝试补全当前局面。</small>
+
+<script>
+(function(){
+  const boardEl = document.getElementById('board');
+  const msgEl = document.getElementById('msg');
+  const cells = []; // input elements 0..80
+
+  // build grid
+  for (let r=0;r<9;r++){
+    for (let c=0;c<9;c++){
+      const idx = r*9+c;
+      const div = document.createElement('div');
+      div.className = 'cell';
+      if ((c+1)%3===0 && c!==8) div.classList.add('box-right');
+      if ((r+1)%3===0 && r!==8) div.classList.add('box-bottom');
+      if (c%3===0 && c!==0) {} // keep default
+      const inp = document.createElement('input');
+      inp.inputMode = 'numeric';
+      inp.maxLength = 1;
+      inp.dataset.r = r; inp.dataset.c = c; inp.dataset.idx = idx;
+      inp.addEventListener('input', onInput);
+      inp.addEventListener('keydown', onKeydown);
+      inp.addEventListener('paste', onPaste);
+      div.appendChild(inp);
+      boardEl.appendChild(div);
+      cells.push(inp);
+    }
+  }
+
+  function onKeydown(e){
+    // allow backspace, delete, arrows, tab
+    if (e.key >= '1' && e.key <= '9') {
+      // allow
+    } else if (['Backspace','Delete','ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Tab'].includes(e.key)) {
+      // allow
+    } else {
+      e.preventDefault();
+    }
+  }
+
+  function onPaste(e){
+    e.preventDefault();
+  }
+
+  function onInput(e){
+    const el = e.target;
+    let val = el.value.trim();
+    if (val === '') {
+      el.classList.remove('invalid');
+      validateAll(); // recheck other cells
+      return;
+    }
+    // only single digit 1-9
+    if (!/^[1-9]$/.test(val)) {
+      el.value = '';
+      el.classList.remove('invalid');
+      validateAll();
+      return;
+    }
+    // keep value, then validate
+    validateAll();
+  }
+
+  function getGridFromInputs(){
+    const grid = new Array(9).fill(0).map(()=>new Array(9).fill(0));
+    for (let i=0;i<81;i++){
+      const v = cells[i].value.trim();
+      grid[Math.floor(i/9)][i%9] = v === '' ? 0 : parseInt(v,10);
+    }
+    return grid;
+  }
+
+  function validateAll(){
+    // mark invalid cells if they conflict with any same row/col/box
+    const grid = getGridFromInputs();
+    // clear all invalid
+    for (const el of cells) el.classList.remove('invalid');
+    let ok = true;
+    // check duplicates
+    for (let r=0;r<9;r++){
+      for (let c=0;c<9;c++){
+        const v = grid[r][c];
+        if (v === 0) continue;
+        // row
+        for (let cc=0;cc<9;cc++){
+          if (cc===c) continue;
+          if (grid[r][cc] === v) {
+            cells[r*9+c].classList.add('invalid');
+            cells[r*9+cc].classList.add('invalid');
+            ok = false;
+          }
+        }
+        // col
+        for (let rr=0;rr<9;rr++){
+          if (rr===r) continue;
+          if (grid[rr][c] === v){
+            cells[r*9+c].classList.add('invalid');
+            cells[rr*9+c].classList.add('invalid');
+            ok = false;
+          }
+        }
+        // box
+        const br = Math.floor(r/3)*3, bc = Math.floor(c/3)*3;
+        for (let rr=br; rr<br+3; rr++){
+          for (let cc=bc; cc<bc+3; cc++){
+            if (rr===r && cc===c) continue;
+            if (grid[rr][cc] === v){
+              cells[r*9+c].classList.add('invalid');
+              cells[rr*9+cc].classList.add('invalid');
+              ok = false;
+            }
+          }
+        }
+      }
+    }
+    return ok;
+  }
+
+  // Solver using bitmasks and MRV
+  function solveGrid(initialGrid){
+    // initialGrid: 9x9 numbers 0..9
+    // check initial conflicts first
+    const rows = new Array(9).fill(0);
+    const cols = new Array(9).fill(0);
+    const boxes = new Array(9).fill(0);
+    const grid = new Array(9).fill(0).map(()=>new Array(9).fill(0));
+    for (let r=0;r<9;r++){
+      for (let c=0;c<9;c++){
+        const v = initialGrid[r][c];
+        grid[r][c] = v;
+        if (v === 0) continue;
+        const bit = 1<<v;
+        const bi = Math.floor(r/3)*3 + Math.floor(c/3);
+        if ((rows[r] & bit) || (cols[c] & bit) || (boxes[bi] & bit)) {
+          return null; // invalid initial
+        }
+        rows[r] |= bit;
+        cols[c] |= bit;
+        boxes[bi] |= bit;
+      }
+    }
+
+    const empties = [];
+    for (let r=0;r<9;r++){
+      for (let c=0;c<9;c++){
+        if (grid[r][c] === 0) empties.push([r,c]);
+      }
+    }
+
+    // backtracking with MRV
+    function backtrack(){
+      if (empties.length === 0) return true;
+      // find index with fewest candidates
+      let bestIdx = -1, bestCount = 10, bestMask = 0;
+      for (let i=0;i<empties.length;i++){
+        const [r,c] = empties[i];
+        const bi = Math.floor(r/3)*3 + Math.floor(c/3);
+        const used = rows[r] | cols[c] | boxes[bi];
+        const availMask = (~used) & 0x3FE; // bits 1..9
+        const count = popcount(availMask);
+        if (count === 0) return false; // dead end
+        if (count < bestCount){
+          bestCount = count; bestIdx = i; bestMask = availMask;
+          if (count === 1) break;
+        }
+      }
+      // choose cell at bestIdx
+      const [r,c] = empties.splice(bestIdx,1)[0];
+      const bi = Math.floor(r/3)*3 + Math.floor(c/3);
+      // iterate possible digits
+      let mask = bestMask;
+      while (mask){
+        const pickBit = mask & -mask;
+        mask -= pickBit;
+        const d = bitToDigit(pickBit);
+        // place
+        grid[r][c] = d;
+        rows[r] |= (1<<d);
+        cols[c] |= (1<<d);
+        boxes[bi] |= (1<<d);
+        if (backtrack()) return true;
+        // undo
+        grid[r][c] = 0;
+        rows[r] &= ~(1<<d);
+        cols[c] &= ~(1<<d);
+        boxes[bi] &= ~(1<<d);
+      }
+      // restore empties
+      empties.splice(bestIdx,0,[r,c]);
+      return false;
+    }
+
+    const ok = backtrack();
+    return ok ? grid : null;
+  }
+
+  function popcount(x){
+    // x small
+    let c = 0;
+    while (x){ c += x & 1; x >>>= 1; }
+    return c;
+  }
+  function bitToDigit(bit){
+    // bit is power of two 1<<d
+    // find d
+    let d = 0;
+    while ((1<<d) !== bit) d++;
+    return d;
+  }
+
+  // Buttons
+  document.getElementById('startBtn').addEventListener('click', ()=>{
+    msgEl.textContent = '';
+    const ok = validateAll();
+    if (!ok) {
+      msgEl.textContent = '当前输入存在冲突，请先修正标红的格子。';
+      return;
+    }
+    const grid = getGridFromInputs();
+    const solved = solveGrid(grid);
+    if (!solved){
+      msgEl.textContent = '无法求解（无解）。';
+      return;
+    }
+    // fill solution
+    for (let r=0;r<9;r++){
+      for (let c=0;c<9;c++){
+        const idx = r*9+c;
+        cells[idx].value = solved[r][c];
+        cells[idx].classList.remove('invalid');
+      }
+    }
+    msgEl.textContent = '已填充一个可行解。';
+  });
+
+  document.getElementById('clearBtn').addEventListener('click', ()=>{
+    for (const el of cells){ el.value=''; el.classList.remove('invalid'); }
+    msgEl.textContent = '';
+  });
+
+  // Optional: generate a random full valid solution (uses randomized backtracking)
+  document.getElementById('randomBtn').addEventListener('click', ()=>{
+    msgEl.textContent = '生成中...';
+    // create empty grid
+    const grid = new Array(9).fill(0).map(()=>new Array(9).fill(0));
+    // We'll reuse a randomized solver
+    const rows = new Array(9).fill(0);
+    const cols = new Array(9).fill(0);
+    const boxes = new Array(9).fill(0);
+    const empties = [];
+    for (let r=0;r<9;r++){
+      for (let c=0;c<9;c++) empties.push([r,c]);
+    }
+    function randShuffle(arr){
+      for (let i=arr.length-1;i>0;i--){
+        const j = Math.floor(Math.random()*(i+1));
+        const t = arr[i]; arr[i]=arr[j]; arr[j]=t;
+      }
+    }
+    function backtrackRand(){
+      if (empties.length===0) return true;
+      // MRV
+      let bestIdx=-1, bestCount=10, bestMask=0;
+      for (let i=0;i<empties.length;i++){
+        const [r,c] = empties[i];
+        const bi = Math.floor(r/3)*3 + Math.floor(c/3);
+        const used = rows[r] | cols[c] | boxes[bi];
+        const availMask = (~used) & 0x3FE;
+        const count = popcount(availMask);
+        if (count===0) return false;
+        if (count < bestCount){ bestCount=count; bestIdx=i; bestMask=availMask; if (count===1) break;}
+      }
+      const [r,c] = empties.splice(bestIdx,1)[0];
+      // collect candidates then shuffle order
+      const choices = [];
+      let m = bestMask;
+      while (m){
+        const bit = m & -m; m -= bit;
+        choices.push(bitToDigit(bit));
+      }
+      // shuffle choices
+      for (let i=choices.length-1;i>0;i--){
+        const j = Math.floor(Math.random()*(i+1));
+        [choices[i],choices[j]] = [choices[j],choices[i]];
+      }
+      const bi = Math.floor(r/3)*3 + Math.floor(c/3);
+      for (const d of choices){
+        grid[r][c] = d;
+        rows[r] |= (1<<d);
+        cols[c] |= (1<<d);
+        boxes[bi] |= (1<<d);
+        if (backtrackRand()) return true;
+        grid[r][c] = 0;
+        rows[r] &= ~(1<<d);
+        cols[c] &= ~(1<<d);
+        boxes[bi] &= ~(1<<d);
+      }
+      empties.splice(bestIdx,0,[r,c]);
+      return false;
+    }
+
+    // try until success (should be fast)
+    let solution = null;
+    for (let attempts=0; attempts<5; attempts++){
+      // reset
+      for (let i=0;i<9;i++){ rows[i]=cols[i]=boxes[i]=0; }
+      for (let r=0;r<9;r++) for (let c=0;c<9;c++) grid[r][c]=0;
+      empties.length = 0;
+      for (let r=0;r<9;r++) for (let c=0;c<9;c++) empties.push([r,c]);
+      if (backtrackRand()){
+        solution = grid.map(row => row.slice());
+        break;
+      }
+    }
+    if (!solution){
+      msgEl.textContent = '随机生成失败，请重试。';
+      return;
+    }
+    for (let r=0;r<9;r++) for (let c=0;c<9;c++) cells[r*9+c].value = solution[r][c];
+    msgEl.textContent = '已生成一个完整解。';
+  });
+
+})();
+</script>
+</body>
+</html>
